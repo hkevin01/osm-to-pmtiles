@@ -1,46 +1,95 @@
 const express = require('express');
+const OSMConverter = require('../services/osmConverter');
+const JobQueue = require('../services/jobQueue');
+const db = require('../utils/database');
+const logger = require('../utils/logger');
+
 const router = express.Router();
+const jobQueue = new JobQueue();
+const osmConverter = new OSMConverter();
+
+// Initialize converter
+osmConverter.initialize().catch(error => {
+  logger.error('Failed to initialize OSM converter:', error);
+});
 
 // Start conversion job
 router.post('/', async (req, res) => {
   try {
-    const { fileId, filename, options = {} } = req.body;
+    const { fileId, options = {} } = req.body;
     
-    if (!fileId || !filename) {
+    if (!fileId) {
       return res.status(400).json({
-        error: 'Missing required parameters',
-        message: 'fileId and filename are required'
+        error: 'Missing required parameter',
+        message: 'fileId is required'
       });
     }
 
-    // Default conversion options
-    const conversionOptions = {
-      minZoom: options.minZoom || 0,
-      maxZoom: options.maxZoom || 14,
-      layers: options.layers || ['all'],
-      format: 'pmtiles',
-      ...options
+    // Check if file exists
+    const fileQuery = 'SELECT * FROM files WHERE file_id = $1';
+    const fileResult = await db.query(fileQuery, [fileId]);
+    
+    if (fileResult.rows.length === 0) {
+      return res.status(404).json({
+        error: 'File not found',
+        message: `No file found with ID: ${fileId}`
+      });
+    }
+
+    const file = fileResult.rows[0];
+    
+    // Validate file type
+    if (!file.mime_type.includes('application/octet-stream') && !file.original_name.endsWith('.pbf')) {
+      return res.status(400).json({
+        error: 'Invalid file type',
+        message: 'Only OSM PBF files are supported'
+      });
+    }
+
+    // Create conversion job
+    const jobId = require('crypto').randomUUID();
+    const jobData = {
+      id: jobId,
+      fileId: fileId,
+      filePath: file.file_path,
+      options: {
+        maxZoom: options.maxZoom || 14,
+        minZoom: options.minZoom || 0,
+        baseZoom: options.baseZoom || 10,
+        layers: options.layers || ['points', 'lines', 'multilinestrings', 'multipolygons']
+      },
+      status: 'pending',
+      createdAt: new Date()
     };
 
-    const jobId = `job_${Date.now()}`;
+    // Add job to queue
+    await jobQueue.addJob('osm-conversion', jobData);
     
-    // TODO: Add job to processing queue
-    // await addConversionJob(jobId, fileId, filename, conversionOptions);
-    
-    res.status(202).json({
-      message: 'Conversion job started',
+    // Save job to database
+    const insertJobQuery = `
+      INSERT INTO conversion_jobs (job_id, file_id, status, options, created_at)
+      VALUES ($1, $2, $3, $4, $5)
+    `;
+    await db.query(insertJobQuery, [
       jobId,
       fileId,
-      options: conversionOptions,
-      status: 'queued',
-      estimatedTime: '15-30 minutes'
+      'pending',
+      JSON.stringify(jobData.options),
+      new Date()
+    ]);
+
+    res.status(201).json({
+      success: true,
+      jobId: jobId,
+      status: 'pending',
+      message: 'Conversion job created successfully'
     });
 
   } catch (error) {
-    console.error('Conversion start error:', error);
+    logger.error('Error creating conversion job:', error);
     res.status(500).json({
-      error: 'Failed to start conversion',
-      message: error.message
+      error: 'Internal server error',
+      message: 'Failed to create conversion job'
     });
   }
 });
@@ -50,63 +99,35 @@ router.get('/status/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     
-    // TODO: Get job status from queue/database
-    // const jobStatus = await getJobStatus(jobId);
+    const query = 'SELECT * FROM conversion_jobs WHERE job_id = $1';
+    const result = await db.query(query, [jobId]);
     
-    const mockStatus = {
-      jobId,
-      status: 'processing', // queued, processing, completed, failed
-      progress: 45,
-      startedAt: new Date().toISOString(),
-      estimatedCompletion: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-      currentStep: 'Generating vector tiles'
-    };
-    
-    res.status(200).json(mockStatus);
-    
-  } catch (error) {
-    console.error('Status check error:', error);
-    res.status(500).json({
-      error: 'Failed to get conversion status',
-      message: error.message
-    });
-  }
-});
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: 'Job not found',
+        message: `No job found with ID: ${jobId}`
+      });
+    }
 
-// Get conversion history
-router.get('/history', async (req, res) => {
-  try {
-    const { page = 1, limit = 10 } = req.query;
+    const job = result.rows[0];
     
-    // TODO: Get conversion history from database
-    // const history = await getConversionHistory(page, limit);
-    
-    const mockHistory = {
-      jobs: [
-        {
-          jobId: 'job_1234567890',
-          filename: 'sample_city.osm.pbf',
-          status: 'completed',
-          startedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-          completedAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
-          outputFile: 'sample_city.pmtiles'
-        }
-      ],
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: 1,
-        pages: 1
-      }
-    };
-    
-    res.status(200).json(mockHistory);
-    
+    res.json({
+      jobId: job.job_id,
+      status: job.status,
+      progress: job.progress || 0,
+      startedAt: job.started_at,
+      completedAt: job.completed_at,
+      errorMessage: job.error_message,
+      outputFile: job.output_file,
+      fileSize: job.output_file_size,
+      options: job.options
+    });
+
   } catch (error) {
-    console.error('History retrieval error:', error);
+    logger.error('Error getting job status:', error);
     res.status(500).json({
-      error: 'Failed to get conversion history',
-      message: error.message
+      error: 'Internal server error',
+      message: 'Failed to get job status'
     });
   }
 });
@@ -116,19 +137,34 @@ router.delete('/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     
-    // TODO: Cancel job in queue
-    // await cancelJob(jobId);
+    // Update job status to cancelled
+    const updateQuery = `
+      UPDATE conversion_jobs 
+      SET status = 'cancelled', completed_at = NOW()
+      WHERE job_id = $1 AND status IN ('pending', 'running')
+    `;
+    const result = await db.query(updateQuery, [jobId]);
     
-    res.status(200).json({
-      message: 'Conversion job cancelled',
-      jobId
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        error: 'Job not found or cannot be cancelled',
+        message: 'Job may already be completed or does not exist'
+      });
+    }
+
+    // Remove from queue if pending
+    await jobQueue.removeJob(jobId);
+
+    res.json({
+      success: true,
+      message: 'Job cancelled successfully'
     });
-    
+
   } catch (error) {
-    console.error('Job cancellation error:', error);
+    logger.error('Error cancelling job:', error);
     res.status(500).json({
-      error: 'Failed to cancel job',
-      message: error.message
+      error: 'Internal server error',
+      message: 'Failed to cancel job'
     });
   }
 });

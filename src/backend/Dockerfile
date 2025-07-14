@@ -1,5 +1,21 @@
 FROM node:18-alpine
 
+# Install OSM processing tools
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    build-base \
+    sqlite \
+    sqlite-dev \
+    zlib-dev \
+    gdal \
+    gdal-dev \
+    gdal-tools \
+    curl \
+    && pip3 install --break-system-packages tippecanoe \
+    && curl -L -o /usr/local/bin/pmtiles "https://github.com/protomaps/go-pmtiles/releases/download/v1.11.1/pmtiles_linux_x86_64" \
+    && chmod +x /usr/local/bin/pmtiles
+
 WORKDIR /app
 
 # Copy package.json and package-lock.json (if available)

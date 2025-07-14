@@ -1,6 +1,4 @@
--- Create database and enable PostGIS extension
-CREATE DATABASE osmtiles;
-
+-- Database osmtiles is already created by PostGIS image
 -- Connect to the database
 \c osmtiles;
 
@@ -19,24 +17,26 @@ CREATE TABLE IF NOT EXISTS files (
     mime_type VARCHAR(100),
     upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR(50) DEFAULT 'uploaded',
-    metadata JSONB
+    conversion_status VARCHAR(50) DEFAULT 'pending',
+    pmtiles_path TEXT,
+    metadata JSONB,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS conversion_jobs (
-    id SERIAL PRIMARY KEY,
-    job_id VARCHAR(255) UNIQUE NOT NULL,
+    id VARCHAR(255) PRIMARY KEY,
     file_id VARCHAR(255) REFERENCES files(file_id),
     status VARCHAR(50) DEFAULT 'queued',
     progress INTEGER DEFAULT 0,
     options JSONB,
+    result JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     completed_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     error_message TEXT,
-    current_step VARCHAR(255),
-    output_file VARCHAR(255),
-    output_size BIGINT,
-    processing_metrics JSONB
+    output_file TEXT,
+    output_file_size BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS job_logs (

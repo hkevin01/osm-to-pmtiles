@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   Container,
   Typography,
@@ -15,22 +15,70 @@ import {
   LinearProgress,
   Grid,
   Card,
-  CardContent
+  CardContent,
+  Stepper,
+  Step,
+  StepLabel,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  FormControlLabel,
+  Switch,
+  Slider
 } from '@mui/material';
+import { 
+  CloudUpload, 
+  Description, 
+  Settings,
+  ExpandMore,
+  CheckCircle,
+  Error as ErrorIcon
+} from '@mui/icons-material';
 import { useDropzone } from 'react-dropzone';
-import { CloudUpload, Description } from '@mui/icons-material';
+import axios from 'axios';
 
 const Upload = () => {
   const [uploadedFile, setUploadedFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [activeStep, setActiveStep] = useState(0);
+  const [fileId, setFileId] = useState(null);
+  const [jobId, setJobId] = useState(null);
+  const [conversionStatus, setConversionStatus] = useState(null);
   const [conversionOptions, setConversionOptions] = useState({
     minZoom: 0,
     maxZoom: 14,
-    layers: ['all']
+    baseZoom: 10,
+    layers: ['points', 'lines', 'multilinestrings', 'multipolygons'],
+    compress: true
   });
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+
+  const steps = ['Upload File', 'Configure Options', 'Convert to PMTiles', 'Complete'];
+
+  // Poll conversion status
+  useEffect(() => {
+    if (jobId && conversionStatus?.status === 'running') {
+      const interval = setInterval(async () => {
+        try {
+          const response = await axios.get(`/api/convert/status/${jobId}`);
+          setConversionStatus(response.data);
+          
+          if (response.data.status === 'completed') {
+            setActiveStep(3);
+            setSuccess('Conversion completed successfully!');
+          } else if (response.data.status === 'failed') {
+            setError(response.data.errorMessage || 'Conversion failed');
+          }
+        } catch (error) {
+          console.error('Error checking conversion status:', error);
+        }
+      }, 2000);
+
+      return () => clearInterval(interval);
+    }
+  }, [jobId, conversionStatus?.status]);
 
   const onDrop = useCallback((acceptedFiles) => {
     const file = acceptedFiles[0];
@@ -38,90 +86,68 @@ const Upload = () => {
       setUploadedFile(file);
       setError(null);
       setSuccess(null);
+      setActiveStep(0);
     }
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'application/octet-stream': ['.pbf', '.osm.pbf']
+      'application/octet-stream': ['.pbf', '.osm.pbf'],
+      'application/x-protobuf': ['.pbf']
     },
     maxFiles: 1,
     maxSize: 10 * 1024 * 1024 * 1024 // 10GB
   });
 
   const handleUpload = async () => {
-    if (!uploadedFile) {
-      setError('Please select a file to upload');
-      return;
-    }
+    if (!uploadedFile) return;
 
     setUploading(true);
-    setUploadProgress(0);
     setError(null);
-
+    
     const formData = new FormData();
-    formData.append('osmFile', uploadedFile);
+    formData.append('file', uploadedFile);
 
     try {
-      // Simulate upload progress
-      const progressInterval = setInterval(() => {
-        setUploadProgress(prev => {
-          if (prev >= 90) {
-            clearInterval(progressInterval);
-            return prev;
-          }
-          return prev + 10;
-        });
-      }, 200);
-
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/upload`, {
-        method: 'POST',
-        body: formData
+      const response = await axios.post('/api/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
+          setUploadProgress(percentCompleted);
+        },
       });
 
-      clearInterval(progressInterval);
-      setUploadProgress(100);
-
-      if (response.ok) {
-        const result = await response.json();
-        setSuccess(`File uploaded successfully! File ID: ${result.file.id}`);
-        
-        // Start conversion
-        setTimeout(() => {
-          handleStartConversion(result.file.id, result.file.filename);
-        }, 1000);
-      } else {
-        const error = await response.json();
-        setError(error.message || 'Upload failed');
-      }
-    } catch (err) {
-      setError('Network error occurred during upload');
+      setFileId(response.data.fileId);
+      setSuccess('File uploaded successfully!');
+      setActiveStep(1);
+    } catch (error) {
+      setError(error.response?.data?.message || 'Upload failed');
     } finally {
       setUploading(false);
+      setUploadProgress(0);
     }
   };
 
-  const handleStartConversion = async (fileId, filename) => {
+  const handleStartConversion = async () => {
+    if (!fileId) return;
+
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/convert`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          fileId,
-          filename,
-          options: conversionOptions
-        })
+      setActiveStep(2);
+      const response = await axios.post('/api/convert', {
+        fileId,
+        options: conversionOptions
       });
 
-      if (response.ok) {
-        const result = await response.json();
-        setSuccess(prev => `${prev}\nConversion started! Job ID: ${result.jobId}`);
-      }
-    } catch (err) {
-      setError('Failed to start conversion');
+      setJobId(response.data.jobId);
+      setConversionStatus({ status: 'pending' });
+      setSuccess('Conversion started successfully!');
+    } catch (error) {
+      setError(error.response?.data?.message || 'Failed to start conversion');
     }
   };
 
@@ -133,6 +159,28 @@ const Upload = () => {
     { value: 'landuse', label: 'Land Use' },
     { value: 'natural', label: 'Natural Features' }
   ];
+
+  const formatFileSize = (bytes) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  const getConversionProgress = () => {
+    if (!conversionStatus) return 0;
+    return conversionStatus.progress || 0;
+  };
+
+  const isStepCompleted = (step) => {
+    switch (step) {
+      case 0: return fileId !== null;
+      case 1: return activeStep > 1;
+      case 2: return conversionStatus?.status === 'completed';
+      default: return false;
+    }
+  };
 
   return (
     <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>

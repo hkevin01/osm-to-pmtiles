@@ -2,12 +2,27 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
+const { v4: uuidv4 } = require('uuid');
+const OSMConverter = require('../services/osmConverter');
+const JobQueue = require('../services/jobQueue');
+const db = require('../utils/database');
+const logger = require('../utils/logger');
+
 const router = express.Router();
+
+// Initialize services
+const osmConverter = new OSMConverter();
+const jobQueue = new JobQueue();
+
+// Initialize converter
+osmConverter.initialize().catch(error => {
+  logger.error('Failed to initialize OSM converter in upload route:', error);
+});
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
-    const uploadDir = process.env.UPLOAD_DIR || './data/uploads';
+    const uploadDir = '/app/data/uploads';
     try {
       await fs.mkdir(uploadDir, { recursive: true });
       cb(null, uploadDir);
@@ -51,22 +66,77 @@ router.post('/', upload.single('osmFile'), async (req, res) => {
       });
     }
 
-    const fileInfo = {
-      id: Date.now().toString(),
-      originalName: req.file.originalname,
-      filename: req.file.filename,
-      size: req.file.size,
-      path: req.file.path,
-      uploadedAt: new Date().toISOString(),
-      status: 'uploaded'
+    const fileId = uuidv4();
+    const filePath = req.file.path;
+
+    // Validate the uploaded file
+    const validation = await osmConverter.validatePBFFile(filePath);
+    if (!validation.valid) {
+      // Remove invalid file
+      await fs.unlink(filePath);
+      return res.status(400).json({
+        error: 'Invalid file',
+        message: validation.error
+      });
+    }
+
+    // Store file information in database
+    const query = `
+      INSERT INTO files (file_id, original_name, filename, file_path, file_size, mime_type, upload_date, status)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
+      RETURNING *
+    `;
+    
+    const result = await db.query(query, [
+      fileId,
+      req.file.originalname,
+      req.file.filename,
+      filePath,
+      req.file.size,
+      req.file.mimetype || 'application/octet-stream',
+      'uploaded'
+    ]);
+
+    const fileInfo = result.rows[0];
+
+    // Parse conversion options from request
+    const options = {
+      minZoom: parseInt(req.body.minZoom) || 0,
+      maxZoom: parseInt(req.body.maxZoom) || 14,
+      layers: req.body.layers ? JSON.parse(req.body.layers) : [],
+      simplification: req.body.simplification || 'auto',
+      autoConvert: req.body.autoConvert !== 'false'
     };
 
-    // TODO: Save file info to database
-    // await saveFileInfo(fileInfo);
+    let jobInfo = null;
+
+    // Start conversion if auto-convert is enabled
+    if (options.autoConvert) {
+      jobInfo = await jobQueue.addConversionJob({
+        fileId,
+        filePath,
+        options
+      });
+    }
+
+    logger.info(`File uploaded: ${fileId}, Auto-convert: ${options.autoConvert}`);
 
     res.status(200).json({
       message: 'File uploaded successfully',
-      file: fileInfo
+      file: {
+        id: fileInfo.file_id,
+        originalName: fileInfo.original_name,
+        filename: fileInfo.filename,
+        size: fileInfo.file_size,
+        sizeFormatted: validation.sizeFormatted,
+        uploadedAt: fileInfo.upload_date,
+        status: fileInfo.status,
+        validation
+      },
+      job: jobInfo,
+      nextSteps: options.autoConvert ? 
+        'Conversion started automatically' : 
+        'Use /api/convert endpoint to start conversion'
     });
 
   } catch (error) {

@@ -45,6 +45,23 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Database health check endpoint
+app.get('/health/db', async (req, res) => {
+  try {
+    const db = require('./utils/database');
+    const result = await db.query('SELECT current_user, current_database(), NOW() as timestamp');
+    res.status(200).json({
+      status: 'healthy',
+      database: result.rows[0]
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message
+    });
+  }
+});
+
 // API routes
 app.use('/api/upload', require('./routes/upload'));
 app.use('/api/convert', require('./routes/convert'));
